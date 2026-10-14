@@ -1,10 +1,10 @@
 # skills-grok
 
-Ce dépôt héberge des skills au format Cursor et Anthropic : un dossier par skill, un `SKILL.md` avec `name` et `description`, le code dans `scripts/`.
+This repository hosts skills in the Cursor and Anthropic format: one folder per skill, a `SKILL.md` with `name` and `description`, and the code in `scripts/`.
 
-La seule skill pour l’instant est grok-status.
+The only skill for now is grok-status.
 
-- Dossier : https://github.com/knoel99/skills-grok/tree/main/skills/grok-status
-- Script : https://raw.githubusercontent.com/knoel99/skills-grok/main/skills/grok-status/scripts/grok-status.py
+- Folder: https://github.com/knoel99/skills-grok/tree/main/skills/grok-status
+- Script: https://raw.githubusercontent.com/knoel99/skills-grok/main/skills/grok-status/scripts/grok-status.py
 
-On ne télécharge ce script qu’après un oui.
+Download this script only after a yes.
