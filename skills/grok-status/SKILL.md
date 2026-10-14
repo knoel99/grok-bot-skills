@@ -30,8 +30,6 @@ On yes, download only this file:
 
 Write it to `~/.grok/heavy/status.py`. Do not rewrite it on a later job.
 
-Replace `knoel99/skills-grok` before publishing.
-
 If this folder is already on disk (Cursor, Claude, or Grok Build), skip the download and run `scripts/grok-status.py` from the skill directory.
 
 ## Run
