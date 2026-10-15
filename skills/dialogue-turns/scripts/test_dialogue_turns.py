@@ -18,7 +18,12 @@ TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 
 def turn_text(bot, thoughts, message):
-    return f"BOT: {bot}\nPENSEES: {thoughts}\nMESSAGE: {message}\n"
+    return f"BOT: {bot}\nTHOUGHTS: {thoughts}\nMESSAGE: {message}\n"
+
+
+def read_text(path):
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
 
 
 class ParseTurnTests(unittest.TestCase):
@@ -35,7 +40,7 @@ class ParseTurnTests(unittest.TestCase):
     def test_missing_field(self):
         with self.assertRaises(ValueError) as caught:
             dialogue_turns.parse_turn("BOT: alice\nMESSAGE: Hello.\n", roster="alice")
-        self.assertIn("PENSEES", str(caught.exception))
+        self.assertIn("THOUGHTS", str(caught.exception))
 
     def test_unknown_bot(self):
         with self.assertRaises(ValueError) as caught:
@@ -44,14 +49,20 @@ class ParseTurnTests(unittest.TestCase):
 
     def test_empty_message(self):
         with self.assertRaises(ValueError) as caught:
-            dialogue_turns.parse_turn("BOT: alice\nPENSEES: secret\nMESSAGE:   \n", roster="alice")
+            dialogue_turns.parse_turn("BOT: alice\nTHOUGHTS: secret\nMESSAGE:   \n", roster="alice")
         self.assertIn("MESSAGE", str(caught.exception))
 
     def test_fields_must_be_in_order(self):
-        text = "BOT: alice\nMESSAGE: Hi.\nPENSEES: secret\n"
+        text = "BOT: alice\nMESSAGE: Hi.\nTHOUGHTS: secret\n"
         with self.assertRaises(ValueError) as caught:
             dialogue_turns.parse_turn(text, roster="alice")
-        self.assertIn("order", str(caught.exception))
+        self.assertIn("BOT, THOUGHTS, MESSAGE", str(caught.exception))
+
+    def test_french_thoughts_label_is_rejected(self):
+        text = "BOT: alice\nPENSEES: secret\nMESSAGE: Hi.\n"
+        with self.assertRaises(ValueError) as caught:
+            dialogue_turns.parse_turn(text, roster="alice")
+        self.assertIn("THOUGHTS", str(caught.exception))
 
 
 class ApplyTurnTests(unittest.TestCase):
@@ -63,18 +74,19 @@ class ApplyTurnTests(unittest.TestCase):
                 roster="alice,bob",
             )
             dialogue_turns.apply_turn(run_dir, parsed)
-            transcript = dialogue_turns._read_text(os.path.join(run_dir, "transcript.md"))
+            transcript = read_text(os.path.join(run_dir, "transcript.md"))
             self.assertEqual(transcript, "**alice:** Just a public hello.\n")
             self.assertNotIn(secret, transcript)
-            self.assertNotIn("PENSEES", transcript)
+            self.assertNotIn("THOUGHTS", transcript)
             for root, _dirs, files in os.walk(run_dir):
                 for name in files:
-                    content = dialogue_turns._read_text(os.path.join(root, name))
+                    content = read_text(os.path.join(root, name))
                     if name == "alice.jsonl":
                         self.assertIn(secret, content)
                     else:
                         self.assertNotIn(secret, content)
-            records = dialogue_turns._read_jsonl(os.path.join(run_dir, "thoughts", "alice.jsonl"))
+            thoughts_file = read_text(os.path.join(run_dir, "thoughts", "alice.jsonl"))
+            records = [json.loads(line) for line in thoughts_file.splitlines() if line.strip()]
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0]["thoughts"], secret)
             self.assertEqual(records[0]["turn"], 1)
@@ -142,34 +154,57 @@ class ApplyTurnTests(unittest.TestCase):
 class SceneTests(unittest.TestCase):
     def test_scene_roundtrip(self):
         rendered = dialogue_turns.render_scene(
-            lieu="the cafe",
-            humeur={"alice": "wary", "bob": "cheerful"},
-            prochain="alice",
-            consigne="aparte with bob",
+            "the cafe",
+            {"alice": "wary", "bob": "cheerful"},
+            "alice",
+            "aside with bob",
         )
         self.assertEqual(
             rendered,
             "SCENE:\n"
-            "lieu: the cafe\n"
-            "humeur: alice=wary; bob=cheerful\n"
-            "prochain: alice\n"
-            "consigne: aparte with bob\n",
+            "place: the cafe\n"
+            "mood: alice=wary; bob=cheerful\n"
+            "next: alice\n"
+            "directive: aside with bob\n",
         )
         parsed = dialogue_turns.parse_scene(rendered)
-        self.assertEqual(parsed["lieu"], "the cafe")
-        self.assertEqual(parsed["humeur"], {"alice": "wary", "bob": "cheerful"})
-        self.assertEqual(parsed["prochain"], "alice")
-        self.assertEqual(parsed["consigne"], "aparte with bob")
-        packed = dialogue_turns.parse_scene(
-            "SCENE:\nlieu: street\nhumeur: alice=wary;bob=cheerful\nprochain: bob\n"
+        self.assertEqual(
+            parsed,
+            {
+                "place": "the cafe",
+                "mood": {"alice": "wary", "bob": "cheerful"},
+                "next": "alice",
+                "directive": "aside with bob",
+            },
         )
-        self.assertEqual(packed["humeur"], {"alice": "wary", "bob": "cheerful"})
-        self.assertIsNone(packed["consigne"])
+        packed = dialogue_turns.parse_scene(
+            "SCENE:\nplace: street\nmood: alice=wary;bob=cheerful\nnext: bob\n"
+        )
+        self.assertEqual(
+            packed,
+            {
+                "place": "street",
+                "mood": {"alice": "wary", "bob": "cheerful"},
+                "next": "bob",
+                "directive": None,
+            },
+        )
 
     def test_scene_missing_field(self):
         with self.assertRaises(ValueError) as caught:
-            dialogue_turns.parse_scene("SCENE:\nlieu: street\nprochain: bob\n")
-        self.assertIn("humeur", str(caught.exception))
+            dialogue_turns.parse_scene("SCENE:\nplace: street\nnext: bob\n")
+        self.assertIn("mood", str(caught.exception))
+
+    def test_french_scene_keys_are_rejected(self):
+        french = "SCENE:\nlieu: street\nhumeur: alice=calm\nprochain: bob\n"
+        with self.assertRaises(ValueError) as caught:
+            dialogue_turns.parse_scene(french)
+        self.assertIn("lieu", str(caught.exception))
+        english = dialogue_turns.parse_scene("SCENE:\nplace: street\nmood: alice=calm\nnext: bob\n")
+        self.assertEqual(english["place"], "street")
+        self.assertEqual(english["mood"], {"alice": "calm"})
+        self.assertEqual(english["next"], "bob")
+        self.assertIsNone(english["directive"])
 
 
 class CliTests(unittest.TestCase):
@@ -207,11 +242,39 @@ class CliTests(unittest.TestCase):
             self.assertEqual(proc.stdout, "**alice:** Public.\n")
             self.assertNotIn("SECRET_CLI", proc.stdout)
             self.assertNotIn("SECRET_CLI", proc.stderr)
-            transcript = dialogue_turns._read_text(os.path.join(run_dir, "transcript.md"))
+            transcript = read_text(os.path.join(run_dir, "transcript.md"))
             self.assertEqual(transcript, "**alice:** Public.\n")
             self.assertNotIn("SECRET_CLI", transcript)
-            stored = dialogue_turns._read_text(os.path.join(run_dir, "thoughts", "alice.jsonl"))
+            stored = read_text(os.path.join(run_dir, "thoughts", "alice.jsonl"))
             self.assertIn("SECRET_CLI", stored)
+
+    def test_render_scene_cli_uses_english_keys(self):
+        proc = subprocess.run(
+            [
+                sys.executable,
+                SCRIPT,
+                "render-scene",
+                "--place",
+                "the cafe",
+                "--mood",
+                "alice=wary; bob=cheerful",
+                "--next",
+                "alice",
+                "--directive",
+                "aside with bob",
+            ],
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.stdout,
+            "SCENE:\n"
+            "place: the cafe\n"
+            "mood: alice=wary; bob=cheerful\n"
+            "next: alice\n"
+            "directive: aside with bob\n",
+        )
 
 
 if __name__ == "__main__":
