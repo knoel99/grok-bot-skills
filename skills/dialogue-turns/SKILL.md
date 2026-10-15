@@ -3,7 +3,7 @@ name: dialogue-turns
 description: >
   Parse and validate dialogue turns for a multi-bot simulation in which one
   session plays several persona bots plus an omniscient narrator. Use when a
-  bot must emit BOT, PENSEES, and MESSAGE, or when the narrator must receive
+  bot must emit BOT, THOUGHTS, and MESSAGE, or when the narrator must receive
   a SCENE block. Keeps private thoughts out of the shared transcript. Do not
   use to invent the plot, or to show one bot another bot's thoughts.
 ---
@@ -24,7 +24,7 @@ A bot turn is exactly these three fields, in this order, each once:
 
 ```
 BOT: <name>
-PENSEES: <private inner thoughts>
+THOUGHTS: <private inner thoughts>
 MESSAGE: <public line>
 ```
 
@@ -34,13 +34,13 @@ The narrator receives this block before each reply:
 
 ```
 SCENE:
-lieu: <place>
-humeur: <name>=<state>; <name>=<state>
-prochain: <name>
-consigne: <optional, for example aparte with X / interruption>
+place: <place>
+mood: <name>=<state>; <name>=<state>
+next: <name>
+directive: <optional, for example aside with X, or an interruption>
 ```
 
-`consigne` may be omitted. `lieu`, `humeur`, and `prochain` may not.
+`directive` may be omitted. `place`, `mood`, and `next` may not.
 
 ## Privacy
 
@@ -59,7 +59,7 @@ There is no helper that returns another bot's thoughts for a persona prompt.
 
 Bot lines: low. A sentence or two of private thought, then one public line.
 
-Narrator turns: higher. Read the transcript and every thought, then write `lieu`, `humeur`, `prochain`, and `consigne` with care.
+Narrator turns: higher. Read the transcript and every thought, then write `place`, `mood`, `next`, and `directive` with care.
 
 ## CLI
 
@@ -79,10 +79,10 @@ python3 scripts/dialogue_turns.py private --run-dir /workspace/runs/<id> --bot a
 python3 scripts/dialogue_turns.py narrator --run-dir /workspace/runs/<id>
 python3 scripts/dialogue_turns.py scene < scene.txt
 python3 scripts/dialogue_turns.py render-scene \
-  --lieu "the cafe" \
-  --humeur "alice=wary; bob=cheerful" \
-  --prochain alice \
-  --consigne "aparte with bob"
+  --place "the cafe" \
+  --mood "alice=wary; bob=cheerful" \
+  --next alice \
+  --directive "aside with bob"
 ```
 
 `private` defaults to the last 3 thoughts. Its stdout is for that bot's prompt only. `narrator` stdout is for the narrator's prompt only. Do not paste either into the shared session.
