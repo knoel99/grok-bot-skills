@@ -27,6 +27,8 @@ HIGH_CAP = 2
 PRIVATE_CAP = 4
 MOVE_TIMEOUT = 90
 PILOT_CAP_S = 120
+DIRECTOR_EFFORT = "medium"
+DIRECTOR_MAX_TURNS = 4
 SHEET_KEYS = (
     "title",
     "place",
@@ -66,13 +68,13 @@ class SubprocessGrok:
         self.binary = binary
         self.timeout = timeout
 
-    def complete(self, prompt, session_id, effort, timeout):
+    def complete(self, prompt, session_id, effort, timeout, max_turns=1):
         command = [
             self.binary,
             "-p",
             prompt,
             "--max-turns",
-            "1",
+            str(max_turns),
             "--no-subagents",
             "--output-format",
             "streaming-json",
@@ -533,8 +535,17 @@ def _cmd_sheet(args):
         ]
     )
     client = SubprocessGrok(args.grok, args.move_timeout)
-    result = client.complete(prompt, None, "low", args.move_timeout)
-    sheet, cards = parse_director(result.text)
+    result = _complete_director(client, prompt, None, args.move_timeout)
+    try:
+        sheet, cards = parse_director(result.text)
+    except ValueError as exc:
+        result = _complete_director(
+            client,
+            _director_retry_prompt(prompt, result, exc),
+            result.session_id,
+            args.move_timeout,
+        )
+        sheet, cards = parse_director(result.text)
     sheet["duration"] = " ".join(args.duration.split())
     sheet["word_cap"] = "45"
     names = [name for name, _fact in cast]
@@ -1208,27 +1219,97 @@ def _prompt(name):
     return _read(os.path.join(PROMPTS, name))
 
 
-def _stream_text(stdout):
-    parts = []
-    for line in stdout.splitlines():
+def _complete_director(client, prompt, session_id, timeout):
+    return client.complete(prompt, session_id, DIRECTOR_EFFORT, timeout, DIRECTOR_MAX_TURNS)
+
+
+def _director_retry_prompt(prompt, result, error):
+    note = "\n".join(
+        [
+            "The previous reply was rejected: " + str(error),
+            "Reply again with SHEET and PRIVATE only, in the example's shape.",
+            "Do not write a sentence before SHEET.",
+        ]
+    )
+    if result.session_id:
+        return note
+    rejected = result.text.strip() or "(empty)"
+    return prompt + "\n\nREJECTED:\n" + rejected + "\n\n" + note
+
+
+def _stream_events(stdout):
+    for line in (stdout or "").splitlines():
         try:
             item = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if item.get("type") == "text":
-            parts.append(item.get("data") or "")
-    return "".join(parts).strip()
+        if isinstance(item, dict):
+            yield item
+
+
+def _content_text(value):
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, dict):
+        return ""
+    if value.get("type") not in (None, "text"):
+        return ""
+    text = value.get("text")
+    if isinstance(text, str):
+        return text
+    data = value.get("data")
+    if isinstance(data, str):
+        return data
+    return ""
+
+
+def _visible_text(item):
+    if item.get("type") == "thought" or item.get("sessionUpdate") == "agent_thought_chunk":
+        return ""
+    kind = item.get("type")
+    if kind == "text" or item.get("sessionUpdate") == "agent_message_chunk":
+        data = item.get("data")
+        if isinstance(data, str) and data:
+            return data
+        text = item.get("text")
+        if isinstance(text, str) and text:
+            return text
+        return _content_text(item.get("content"))
+    if kind != "assistant":
+        return ""
+    message = item.get("message") or {}
+    content = message.get("content") or []
+    if isinstance(content, str):
+        return content
+    parts = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+            parts.append(block["text"])
+    return "".join(parts)
+
+
+def _stream_text(stdout):
+    chunks = []
+    result_text = None
+    for item in _stream_events(stdout):
+        if item.get("type") == "result" and isinstance(item.get("result"), str):
+            result_text = item["result"]
+        piece = _visible_text(item)
+        if piece:
+            chunks.append(piece)
+    text = "".join(chunks).strip()
+    if text:
+        return text
+    return (result_text or "").strip()
 
 
 def _stream_session(stdout):
     found = None
-    for line in stdout.splitlines():
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if item.get("sessionId"):
-            found = item["sessionId"]
+    for item in _stream_events(stdout):
+        for key in ("sessionId", "session_id"):
+            value = item.get(key)
+            if isinstance(value, str) and value:
+                found = value
     return found
 
 

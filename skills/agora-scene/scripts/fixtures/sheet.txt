@@ -1,0 +1,24 @@
+SHEET:
+title: The note
+place: a small room
+register: spoken
+duration: 30 m
+word_cap: 45
+quorum: 2
+end: time
+goals_conflict: yes
+languages: ada=english; bo=english
+may_interrupt: ada>bo
+stakes: whether to send the note
+present: ada, bo
+PRIVATE:
+bot: ada
+goal: keep the note unsent today
+secret: She hid the march contract on the blue folder
+witness: the march contract on the blue folder
+knows: bo=reads notes
+bot: bo
+goal: send the note before noon
+secret: the spare key is under the mat tonight
+witness: the spare key is under the mat
+knows: ada=wrote the note

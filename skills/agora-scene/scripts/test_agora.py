@@ -773,5 +773,185 @@ class ReviewFixTests(unittest.TestCase):
             self.assertIn("I am going.", page)
 
 
+FIXTURES = os.path.join(SCRIPT_DIR, "fixtures")
+
+STREAM_CAT = textwrap.dedent(
+    """\
+    #!/usr/bin/env python3
+    import os, sys
+    sys.stdout.write(open(os.environ["MOCK_STREAM"], encoding="utf-8").read())
+    """
+)
+
+DIRECTOR_FAKE = textwrap.dedent(
+    """\
+    #!/usr/bin/env python3
+    import json, os, sys
+    args = sys.argv[1:]
+
+    def grab(flag):
+        if flag not in args:
+            return ""
+        return args[args.index(flag) + 1]
+
+    record = {
+        "prompt": grab("-p"),
+        "effort": grab("--effort"),
+        "max_turns": grab("--max-turns"),
+        "resume": grab("--resume"),
+    }
+    with open(os.environ["MOCK_LOG"], "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\\n")
+    count = len([line for line in open(os.environ["MOCK_LOG"], encoding="utf-8") if line.strip()])
+    mode = os.environ.get("MOCK_MODE", "bad")
+    if mode == "retry" and count > 1:
+        data = open(os.environ["MOCK_SHEET"], encoding="utf-8").read()
+    else:
+        data = "I will describe the scene in a paragraph."
+    sys.stdout.write(json.dumps({"type": "text", "data": data}) + "\\n")
+    sys.stdout.write(json.dumps({"type": "end", "sessionId": "dir-1", "stopReason": "end_turn"}) + "\\n")
+    """
+)
+
+
+def replay_stream(name):
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, "fake-grok.py")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(STREAM_CAT)
+        os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
+        previous = os.environ.get("MOCK_STREAM")
+        os.environ["MOCK_STREAM"] = os.path.join(FIXTURES, name)
+        try:
+            client = agora.SubprocessGrok(path, timeout=5)
+            return client.complete("write the sheet", None, "low", 5)
+        finally:
+            if previous is None:
+                os.environ.pop("MOCK_STREAM", None)
+            else:
+                os.environ["MOCK_STREAM"] = previous
+
+
+def run_sheet(parent, mode):
+    fake = os.path.join(parent, "fake-grok.py")
+    with open(fake, "w", encoding="utf-8") as handle:
+        handle.write(DIRECTOR_FAKE)
+    os.chmod(fake, os.stat(fake).st_mode | stat.S_IEXEC)
+    scene = os.path.join(parent, "scene")
+    log = os.path.join(parent, "mock.log")
+    previous = {key: os.environ.get(key) for key in ("MOCK_LOG", "MOCK_MODE", "MOCK_SHEET")}
+    os.environ["MOCK_LOG"] = log
+    os.environ["MOCK_MODE"] = mode
+    os.environ["MOCK_SHEET"] = os.path.join(FIXTURES, "sheet.txt")
+    try:
+        code = agora.main(
+            [
+                "sheet",
+                "--scene",
+                scene,
+                "--situation",
+                "whether to send the note",
+                "--cast",
+                "ada:writes the note,bo:reads the note",
+                "--duration",
+                "30 m",
+                "--grok",
+                fake,
+            ]
+        )
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    return code, log_rows(log), scene
+
+
+class StreamFixtureTests(unittest.TestCase):
+    def test_text_chunks_join_into_a_sheet(self):
+        result = replay_stream("text-chunks.jsonl")
+        sheet, cards = agora.parse_director(result.text)
+        self.assertEqual(sheet["title"], "The note")
+        self.assertEqual([card["bot"] for card in cards], ["ada", "bo"])
+        self.assertEqual(result.session_id, "chunk-1")
+
+    def test_a_thinking_only_stream_is_empty(self):
+        with open(os.path.join(FIXTURES, "thinking-only.jsonl"), encoding="utf-8") as handle:
+            raw = handle.read()
+        self.assertIn("SHEET:", raw)
+        result = replay_stream("thinking-only.jsonl")
+        self.assertEqual(result.text, "")
+        self.assertEqual(result.session_id, "think-1")
+        with self.assertRaises(ValueError) as caught:
+            agora.parse_director(result.text)
+        self.assertEqual(str(caught.exception), "director reply is empty")
+
+    def test_an_empty_result_is_empty(self):
+        result = replay_stream("empty-result.jsonl")
+        self.assertEqual(result.text, "")
+        self.assertEqual(result.session_id, "empty-1")
+        with self.assertRaises(ValueError) as caught:
+            agora.parse_director(result.text)
+        self.assertEqual(str(caught.exception), "director reply is empty")
+
+    def test_a_result_event_carries_the_sheet(self):
+        result = replay_stream("result-only.jsonl")
+        sheet, cards = agora.parse_director(result.text)
+        self.assertEqual(sheet["place"], "a small room")
+        self.assertEqual([card["bot"] for card in cards], ["ada", "bo"])
+        self.assertEqual(result.session_id, "result-1")
+
+    def test_assistant_text_is_kept_and_thinking_is_not(self):
+        result = replay_stream("assistant-blocks.jsonl")
+        self.assertEqual(result.text.count("SHEET:"), 1)
+        self.assertNotIn("not this", result.text)
+        sheet, _cards = agora.parse_director(result.text)
+        self.assertEqual(sheet["title"], "The note")
+        self.assertEqual(result.session_id, "asst-1")
+
+    def test_text_inside_a_content_block_is_kept(self):
+        result = replay_stream("content-text.jsonl")
+        sheet, _cards = agora.parse_director(result.text)
+        self.assertEqual(sheet["title"], "The note")
+        self.assertEqual(result.session_id, "content-1")
+
+
+class DirectorCallTests(unittest.TestCase):
+    def test_the_prompt_example_is_a_valid_sheet(self):
+        prompt = agora._prompt("director.md")
+        example = prompt.split("Example:", 1)[1]
+        sheet, cards = agora.parse_director(example)
+        self.assertEqual(sheet["title"], "The note")
+        self.assertEqual(sheet["word_cap"], "45")
+        self.assertEqual([card["bot"] for card in cards], ["ada", "bo"])
+
+    def test_sheet_retries_once_and_asks_for_more_turns(self):
+        with tempfile.TemporaryDirectory() as parent:
+            code, rows, scene = run_sheet(parent, "retry")
+            page = agora.sheet_text(scene)
+            self.assertEqual(code, 0)
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0]["effort"], "medium")
+            self.assertEqual(rows[0]["max_turns"], "4")
+            self.assertEqual(rows[0]["resume"], "")
+            self.assertIn("title: The note", rows[0]["prompt"])
+            self.assertEqual(rows[1]["resume"], "dir-1")
+            self.assertEqual(rows[1]["effort"], "medium")
+            self.assertEqual(rows[1]["max_turns"], "4")
+            self.assertIn("director reply needs SHEET and PRIVATE", rows[1]["prompt"])
+            self.assertIn("approved: no", page)
+            self.assertNotIn("the march contract on the blue folder", page)
+
+    def test_a_second_format_error_stops(self):
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as parent:
+            with contextlib.redirect_stderr(stderr):
+                code, rows, _scene = run_sheet(parent, "bad")
+        self.assertEqual(code, 1)
+        self.assertEqual(len(rows), 2)
+        self.assertIn("director reply needs SHEET and PRIVATE", stderr.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

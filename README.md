@@ -1,4 +1,4 @@
-# skills-grok
+# grok-bot-skills
 
 Skills in this repository use one folder per skill. Each folder has a `SKILL.md` with `name` and `description`, and code under `scripts/` when the skill runs a program.
 

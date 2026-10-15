@@ -1,0 +1,5 @@
+{"type": "thought", "data": "SHEET:\ntitle: The note\nplace: a small room\nregister: spoken\nduration: 30 m\nword_cap: 45\nquorum: 2\nend: time\ngoals_conflict: yes\nlanguages: ada=english; bo=english\nmay_interrupt: ada>bo\nstakes: whether to send the note\npresent: ada, bo\nPRIVATE:\nbot: ada\ngoal: keep the note unsent today\nsecret: She hid the march contract on the blue folder\nwitness: the march contract on the blue folder\nknows: bo=reads notes\nbot: bo\ngoal: send the note before noon\nsecret: the spare key is under the mat tonight\nwitness: the spare key is under the mat\nknows: ada=wrote the note\n"}
+{"type": "tool_call", "toolCallId": "call_1", "toolName": "read_file", "status": "in_progress"}
+{"type": "usage", "messageId": "resp_1", "stopReason": "tool_use"}
+{"type": "max_turns_reached", "maxTurns": 1}
+{"type": "end", "stopReason": "max_turn_requests", "sessionId": "think-1", "num_turns": 1}
