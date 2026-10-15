@@ -261,11 +261,14 @@ def collect_lines(scene_dir, bot, state):
     return lines
 
 
-def mark_read(scene_dir, bot, state):
+def _cursor_snapshot(scene_dir, bot, state):
+    """Ids of lines included in the prompt just built. This does not mark them read."""
     if bot in state["left"]:
-        return
+        return {}
     channel_dir = os.path.join(scene_dir, "channels")
-    cursors = state["cursors"].setdefault(bot, {})
+    if not os.path.isdir(channel_dir):
+        return {}
+    snapshot = {}
     for name in os.listdir(channel_dir):
         members = _members(name)
         if members is not None and bot not in members:
@@ -273,7 +276,16 @@ def mark_read(scene_dir, bot, state):
         key = name[: -len(".jsonl")] if name.endswith(".jsonl") else name
         events = _read_events(os.path.join(channel_dir, name))
         if events:
-            cursors[key] = events[-1]["id"]
+            snapshot[key] = events[-1]["id"]
+    return snapshot
+
+
+def _advance_cursor(state, bot, snapshot):
+    if not snapshot or bot in state["left"]:
+        return
+    cursors = state["cursors"].setdefault(bot, {})
+    for key, event_id in snapshot.items():
+        cursors[key] = max(cursors.get(key, 0), event_id)
 
 
 def narrator_prompt(sheet, public_lines, seed):
@@ -421,6 +433,11 @@ def run_scene(scene_dir, client, clock, duration_s, rng=None, move_timeout=MOVE_
             continue
         for key, result in ready:
             item = inflight.pop(key)
+            if isinstance(result, Exception):
+                _fail_move(scene_dir, state, key, result)
+                if hasattr(clock, "advance"):
+                    clock.advance(1)
+                continue
             if result.session_id:
                 save_session(scene_dir, key, result.session_id)
             if key == "narrator":
@@ -600,10 +617,23 @@ def _take_ready(inbox, timeout):
 
 
 def _unpack(item):
-    key, payload = item
-    if isinstance(payload, Exception):
-        raise payload
-    return key, payload
+    return item
+
+
+def _fail_move(scene_dir, state, key, exc):
+    """A worker crash is silence. The read cursor stays where it was."""
+    print(f"error: {key}: {exc}", file=sys.stderr)
+    if key != "narrator" and key not in state.get("left", []):
+        _write_public(scene_dir, state, key, "silence", "(silence)")
+        state["open_public_id"] = None
+        state["open_speaker"] = None
+        state["dirty"] = True
+        state["turns"] = state.get("turns", 0) + 1
+        _render(scene_dir)
+        _csv(scene_dir, state, key, "silence", "public", 0, 1, None, "error")
+    else:
+        _csv(scene_dir, state, key, "skip", "", 0, 0, None, "error")
+    save_state(scene_dir, state)
 
 
 def _launch_idle(scene_dir, state, client, inbox, inflight, rng, move_timeout):
@@ -623,7 +653,7 @@ def _launch_idle(scene_dir, state, client, inbox, inflight, rng, move_timeout):
         if not sid:
             seed = participant_prompt(sheet_text(scene_dir), profile, unread, seed=True)
         delta = participant_prompt(sheet_text(scene_dir), profile, unread, seed=False)
-        mark_read(scene_dir, bot, state)
+        read_to = _cursor_snapshot(scene_dir, bot, state)
         effort = _next_effort(state, bot)
         mode = choice.get("mode", "speak") if choice.get("bot") == bot else "speak"
         target = choice.get("target") if choice.get("bot") == bot else None
@@ -633,7 +663,7 @@ def _launch_idle(scene_dir, state, client, inbox, inflight, rng, move_timeout):
             _produce,
             (client, seed, delta, sid, effort, move_timeout, scene_dir, bot, ",".join(state["present"])),
         )
-        inflight[bot] = {"mode": mode, "target": target, "effort": effort}
+        inflight[bot] = {"mode": mode, "target": target, "effort": effort, "read_to": read_to}
 
 
 def _launch_narrator(scene_dir, state, client, inbox, inflight, move_timeout):
@@ -664,10 +694,11 @@ def _produce(client, seed, delta, session_id, effort, timeout, scene_dir, bot, r
         return result
     if _needs_retry(scene_dir, bot, result.text, roster):
         correction = delta + "\n\nSay it again. At most 45 words. Do not repeat another person's private words.\n"
-        second = _call(client, "", correction, result.session_id or session_id, effort, timeout)
+        sid = result.session_id or session_id
+        second = _call(client, seed, correction, sid, effort, timeout)
         second.seconds += result.seconds
         if not second.session_id:
-            second.session_id = result.session_id
+            second.session_id = sid
         if second.text:
             return second
     clipped = _clip_turn(result.text)
@@ -677,16 +708,23 @@ def _produce(client, seed, delta, session_id, effort, timeout, scene_dir, bot, r
 
 
 def _call(client, seed, delta, session_id, effort, timeout):
-    prompt = delta if session_id else (seed + "\n\n" + delta if seed else delta)
-    first = client.complete(prompt, session_id, effort, timeout)
+    first = client.complete(_prompt_for(seed, delta, session_id), session_id, effort, timeout)
     if not first.timed_out:
         return first
     sid = first.session_id or session_id
-    second = client.complete(delta, sid, effort, timeout)
+    second = client.complete(_prompt_for(seed, delta, sid), sid, effort, timeout)
     second.seconds += first.seconds
     if not second.session_id:
         second.session_id = sid
     return second
+
+
+def _prompt_for(seed, delta, session_id):
+    if session_id:
+        return delta
+    if seed:
+        return seed + "\n\n" + delta
+    return delta
 
 
 def _apply_bot(scene_dir, state, bot, item, result):
@@ -705,8 +743,10 @@ def _apply_bot(scene_dir, state, bot, item, result):
         session_id=result.session_id,
         seconds=result.seconds,
     )
-    if note in ("ok", "leave") and item["effort"] == "high":
-        state["high_used"][bot] = state["high_used"].get(bot, 0) + 1
+    if note in ("ok", "leave"):
+        _advance_cursor(state, bot, item.get("read_to"))
+        if item["effort"] == "high":
+            state["high_used"][bot] = state["high_used"].get(bot, 0) + 1
 
 
 def _drain_narrator(scene_dir, state, inflight, inbox, move_timeout):
@@ -719,6 +759,11 @@ def _drain_narrator(scene_dir, state, inflight, inbox, move_timeout):
         except queue.Empty:
             continue
         inflight.pop(key, None)
+        if isinstance(result, Exception):
+            _fail_move(scene_dir, state, key, result)
+            if key == "narrator":
+                return
+            continue
         if key != "narrator":
             continue
         if result.session_id:
@@ -793,7 +838,12 @@ def _narration(text):
         if line.strip().upper().startswith("NEXT:"):
             continue
         kept.append(line)
-    words = " ".join(" ".join(kept).split()).split()
+    body = "\n".join(kept)
+    try:
+        dt._reject_speaker_line(body)
+    except ValueError:
+        return ""
+    words = " ".join(body.split()).split()
     if not words:
         return ""
     return " ".join(words[: dt.WORD_CAP])
@@ -1185,13 +1235,29 @@ def _stream_session(stdout):
 def _read_events(path):
     if not os.path.exists(path):
         return []
+    raw_lines = _read(path).splitlines()
+    last = _last_nonempty(raw_lines)
     events = []
-    for line in _read(path).splitlines():
-        line = line.strip()
-        if not line:
+    for index, line in enumerate(raw_lines):
+        stripped = line.strip()
+        if not stripped:
             continue
-        events.append(json.loads(line))
+        try:
+            events.append(json.loads(stripped))
+        except json.JSONDecodeError:
+            if index != last:
+                raise
+            head = "\n".join(raw_lines[:index])
+            _write(path, head + ("\n" if head else ""))
+            return events
     return events
+
+
+def _last_nonempty(lines):
+    for index in range(len(lines) - 1, -1, -1):
+        if lines[index].strip():
+            return index
+    return -1
 
 
 def _write_events(path, events):

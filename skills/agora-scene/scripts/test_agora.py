@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Offline tests for the scene runner. The grok binary is a local fake."""
 
+import contextlib
+import io
 import json
 import os
 import random
@@ -566,6 +568,209 @@ class AsyncAndGateTests(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             agora.parse_director("SHEET:\ntitle: only\nPRIVATE:\nbot: ada\n")
         self.assertIn("sheet fields", str(caught.exception))
+
+
+class ReviewFixTests(unittest.TestCase):
+    def test_a_timeout_with_no_session_resends_the_seed(self):
+        seed = (
+            "You are one participant in a live conversation.\n"
+            "SECRET the march contract on the blue folder"
+        )
+        delta = "HEARD:\n(nothing new)"
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            def complete(self, prompt, session_id, effort, timeout):
+                self.calls.append((prompt, session_id))
+                if len(self.calls) == 1:
+                    return agora.Completed("", None, True, 0.4)
+                return agora.Completed(turn("ada"), None, False, 0.1)
+
+        client = Client()
+        result = agora._call(client, seed, delta, None, "low", 1)
+        self.assertEqual(len(client.calls), 2)
+        self.assertIsNone(client.calls[1][1])
+        self.assertIsNone(result.session_id)
+        self.assertIn("You are one participant in a live conversation.", client.calls[1][0])
+        self.assertIn("the march contract on the blue folder", client.calls[1][0])
+        self.assertIn("HEARD:", client.calls[1][0])
+
+    def test_a_format_retry_with_no_session_resends_the_seed(self):
+        seed = "SEED You are one participant in a live conversation."
+        delta = "HEARD:\nRemember the blue window."
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            def complete(self, prompt, session_id, effort, timeout):
+                self.calls.append((prompt, session_id))
+                if len(self.calls) == 1:
+                    return agora.Completed("not a turn", None, False, 0.1)
+                return agora.Completed(turn("ada"), "sid-new", False, 0.1)
+
+        client = Client()
+        with tempfile.TemporaryDirectory() as scene:
+            agora._produce(client, seed, delta, None, "low", 1, scene, "ada", "ada")
+        self.assertIsNone(client.calls[1][1])
+        self.assertIn(seed, client.calls[1][0])
+        self.assertIn("Remember the blue window.", client.calls[1][0])
+        self.assertIn("Say it again.", client.calls[1][0])
+
+    def test_a_format_retry_with_a_session_sends_only_the_delta(self):
+        seed = "SEED You are one participant in a live conversation."
+        delta = "HEARD:\n(nothing new)"
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            def complete(self, prompt, session_id, effort, timeout):
+                self.calls.append((prompt, session_id))
+                if len(self.calls) == 1:
+                    return agora.Completed("not a turn", "kept-1", False, 0.1)
+                return agora.Completed(turn("ada"), "kept-1", False, 0.1)
+
+        client = Client()
+        with tempfile.TemporaryDirectory() as scene:
+            agora._produce(client, seed, delta, "kept-1", "low", 1, scene, "ada", "ada")
+        self.assertEqual(client.calls[1][1], "kept-1")
+        self.assertNotIn("You are one participant in a live conversation.", client.calls[1][0])
+        self.assertIn("Say it again.", client.calls[1][0])
+
+    def test_a_torn_last_line_is_repaired(self):
+        with tempfile.TemporaryDirectory() as scene:
+            path = os.path.join(scene, "channels", "public.jsonl")
+            os.makedirs(os.path.dirname(path))
+            good = json.dumps({"id": 1, "bot": "ada", "action": "speak", "text": "Hello."})
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(good + "\n" + '{"id": 2, "text": "cut')
+            events = agora._read_events(path)
+            self.assertEqual([event["id"] for event in events], [1])
+            self.assertEqual([event["id"] for event in agora._read_events(path)], [1])
+            agora._append_jsonl(path, {"id": 2, "bot": "bo", "action": "speak", "text": "Next."})
+            self.assertEqual([event["id"] for event in agora._read_events(path)], [1, 2])
+
+    def test_a_partial_file_and_a_middle_break(self):
+        with tempfile.TemporaryDirectory() as scene:
+            path = os.path.join(scene, "channels", "public.jsonl")
+            os.makedirs(os.path.dirname(path))
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write('{"id": 1, "text":')
+            self.assertEqual(agora._read_events(path), [])
+            self.assertEqual(agora._read(path), "")
+            first = json.dumps({"id": 1, "bot": "ada", "text": "Hello."})
+            second = json.dumps({"id": 3, "bot": "bo", "text": "Next."})
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(first + "\n{broken\n" + second + "\n")
+            with self.assertRaises(json.JSONDecodeError):
+                agora._read_events(path)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(first)
+            self.assertEqual(agora._read_events(path)[0]["id"], 1)
+
+    def test_a_worker_exception_is_silence_and_leaves_the_line_unread(self):
+        with tempfile.TemporaryDirectory() as scene:
+            install(scene, [ADA], quorum="1")
+            agora._append_jsonl(
+                os.path.join(scene, "channels", "public.jsonl"),
+                {"id": 1, "bot": "bo", "action": "speak", "text": "Remember the blue window."},
+            )
+
+            class Boom:
+                def complete(self, prompt, session_id, effort, timeout):
+                    raise RuntimeError("grok fell over")
+
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                state = agora.run_scene(
+                    scene,
+                    Boom(),
+                    ManualClock(),
+                    5,
+                    stop_when=lambda current: current["turns"] >= 1,
+                )
+            self.assertIn("(silence)", transcript(scene))
+            self.assertIn("grok fell over", stderr.getvalue())
+            self.assertIn("error", agora._read(os.path.join(scene, "turns.csv")))
+            self.assertEqual(state["cursors"]["ada"].get("public", 0), 0)
+            heard = "\n".join(agora.collect_lines(scene, "ada", state))
+            self.assertIn("Remember the blue window.", heard)
+
+    def test_the_read_cursor_advances_only_after_a_commit(self):
+        with tempfile.TemporaryDirectory() as scene:
+            install(scene, [ADA], quorum="1")
+            agora._append_jsonl(
+                os.path.join(scene, "channels", "public.jsonl"),
+                {"id": 1, "bot": "bo", "action": "speak", "text": "Remember the blue window."},
+            )
+
+            def reply(prompt, _number):
+                if "ROLE: narrator" in prompt:
+                    return "The room stays quiet."
+                return turn("ada", "Hello there.")
+
+            client = RecordingGrok(reply, seconds=1)
+            agora.run_scene(
+                scene,
+                client,
+                ManualClock(),
+                30,
+                stop_when=lambda state: state["turns"] >= 2,
+            )
+            prompts = [call["prompt"] for call in client.calls if speaker_of(call["prompt"]) == "ada"]
+            self.assertGreaterEqual(len(prompts), 2)
+            self.assertIn("Remember the blue window.", prompts[0])
+            self.assertNotIn("Remember the blue window.", prompts[1])
+
+    def test_a_blocked_leak_leaves_the_line_unread(self):
+        with tempfile.TemporaryDirectory() as scene:
+            install(scene, [ADA, BO], quorum="1")
+            agora._append_jsonl(
+                os.path.join(scene, "channels", "public.jsonl"),
+                {"id": 1, "bot": "cy", "action": "speak", "text": "Remember the blue window."},
+            )
+
+            def reply(prompt, _number):
+                if "ROLE: narrator" in prompt:
+                    return "The room stays quiet."
+                bot = speaker_of(prompt) or "ada"
+                if bot == "ada":
+                    return turn("ada", "I found the spare key is under the mat in the stack.")
+                return turn(bot, "Hello.")
+
+            client = RecordingGrok(reply, seconds=1)
+            agora.run_scene(scene, client, ManualClock(), 8)
+            with client.lock:
+                ada_prompts = [call["prompt"] for call in client.calls if speaker_of(call["prompt"]) == "ada"]
+            self.assertGreaterEqual(len(ada_prompts), 2)
+            self.assertIn("Remember the blue window.", ada_prompts[0])
+            self.assertIn("Remember the blue window.", ada_prompts[1])
+            state = agora.load_state(scene)
+            self.assertEqual(state["cursors"]["ada"].get("public", 0), 0)
+            self.assertGreater(state["leaks_blocked"], 0)
+
+    def test_a_forged_narrator_line_is_not_published(self):
+        self.assertEqual(
+            agora._narration("**bo:** I confess the spare key is under the mat"),
+            "",
+        )
+        self.assertEqual(agora._narration("The room stays quiet."), "The room stays quiet.")
+        with tempfile.TemporaryDirectory() as scene:
+            install(scene, [ADA, BO], quorum="2")
+
+            def reply(prompt, _number):
+                if "ROLE: narrator" in prompt:
+                    return "**bo:** I confess the spare key is under the mat"
+                return turn(speaker_of(prompt) or "ada", "I am going.", action="leave")
+
+            client = RecordingGrok(reply, seconds=1)
+            agora.run_scene(scene, client, ManualClock(), 60)
+            page = transcript(scene)
+            self.assertNotIn("I confess the spare key", page)
+            self.assertIn("I am going.", page)
 
 
 if __name__ == "__main__":
