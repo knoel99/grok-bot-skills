@@ -180,30 +180,22 @@ class ApplyTurnTests(unittest.TestCase):
             self.assertEqual(dialogue_turns.private_context(run_dir, "cara"), [])
 
             narrator = dialogue_turns.narrator_context(run_dir)
-            all_thoughts = [item["thoughts"] for item in narrator["thoughts"]]
             self.assertEqual(
-                all_thoughts,
-                [
-                    "alice-secret-1",
-                    "bob-secret-1",
-                    "alice-secret-2",
-                    "bob-secret-2",
-                    "alice-secret-3",
-                    "alice-secret-4",
-                ],
+                narrator,
+                {
+                    "transcript": (
+                        "**alice:** Hello.\n"
+                        "**bob:** Hi.\n"
+                        "**alice:** Again.\n"
+                        "**bob:** Yes.\n"
+                        "**alice:** Third.\n"
+                        "**alice:** Fourth.\n"
+                    )
+                },
             )
-            self.assertEqual([item["turn"] for item in narrator["thoughts"]], [1, 2, 3, 4, 5, 6])
-            self.assertEqual(
-                narrator["transcript"],
-                "**alice:** Hello.\n"
-                "**bob:** Hi.\n"
-                "**alice:** Again.\n"
-                "**bob:** Yes.\n"
-                "**alice:** Third.\n"
-                "**alice:** Fourth.\n",
-            )
+            narrator_dump = json.dumps(narrator)
             for _bot, thoughts, _message in script:
-                self.assertNotIn(thoughts, narrator["transcript"])
+                self.assertNotIn(thoughts, narrator_dump)
 
 
 class SceneTests(unittest.TestCase):
@@ -330,6 +322,132 @@ class CliTests(unittest.TestCase):
             "next: alice\n"
             "directive: aside with bob\n",
         )
+
+
+def extended_text(bot, thoughts, message, action, channel, effort, show):
+    return (
+        f"BOT: {bot}\n"
+        f"THOUGHTS: {thoughts}\n"
+        f"MESSAGE: {message}\n"
+        f"ACTION: {action}\n"
+        f"CHANNEL: {channel}\n"
+        f"EFFORT: {effort}\n"
+        f"SHOW: {show}\n"
+    )
+
+
+class ExtendedTurnTests(unittest.TestCase):
+    def test_extended_fields_roundtrip(self):
+        parsed = dialogue_turns.parse_turn(
+            extended_text("alice", "keep it short", "Hello.", "speak", "public", "high", "yes"),
+            roster="alice,bob",
+        )
+        self.assertEqual(
+            parsed,
+            {
+                "bot": "alice",
+                "thoughts": "keep it short",
+                "message": "Hello.",
+                "action": "speak",
+                "channel": "public",
+                "effort": "high",
+                "show": "yes",
+            },
+        )
+
+    def test_invalid_action_is_rejected(self):
+        text = extended_text("alice", "nope", "Hello.", "shout", "public", "low", "no")
+        with self.assertRaises(ValueError) as caught:
+            dialogue_turns.parse_turn(text, roster="alice")
+        self.assertIn("invalid ACTION: shout", str(caught.exception))
+
+    def test_new_channel_and_plain_channels(self):
+        for channel in ("public", "dm", "huddle", "new:alice,bob"):
+            parsed = dialogue_turns.parse_turn(
+                extended_text("alice", "routing", "Hello.", "speak", channel, "low", "no"),
+                roster="alice,bob",
+            )
+            self.assertEqual(parsed["channel"], channel)
+        with self.assertRaises(ValueError) as caught:
+            dialogue_turns.parse_turn(
+                extended_text("alice", "routing", "Hello.", "speak", "new:alice", "low", "no"),
+                roster="alice",
+            )
+        self.assertIn("invalid CHANNEL", str(caught.exception))
+
+    def test_word_cap_rejects_the_forty_sixth_word(self):
+        words = " ".join(f"w{i}" for i in range(46))
+        with self.assertRaises(ValueError) as caught:
+            dialogue_turns.parse_turn(turn_text("alice", "too long", words), roster="alice")
+        self.assertIn("46 words", str(caught.exception))
+        self.assertIn("45", str(caught.exception))
+        ok = " ".join(f"w{i}" for i in range(45))
+        parsed = dialogue_turns.parse_turn(turn_text("alice", "fits", ok), roster="alice")
+        self.assertEqual(parsed["message"], ok)
+
+    def test_partial_extra_fields_are_rejected(self):
+        text = "BOT: alice\nTHOUGHTS: x\nMESSAGE: Hi.\nACTION: speak\n"
+        with self.assertRaises(ValueError) as caught:
+            dialogue_turns.parse_turn(text, roster="alice")
+        self.assertIn("CHANNEL", str(caught.exception))
+
+
+class LeakTests(unittest.TestCase):
+    def test_other_private_text_blocks_the_write(self):
+        witness = "the march contract on the blue folder"
+        with tempfile.TemporaryDirectory() as run_dir:
+            dialogue_turns.remember_private(run_dir, "bob", witness)
+            turn = {
+                "bot": "alice",
+                "thoughts": "I should not know that",
+                "message": f"I found {witness} in the stack.",
+            }
+            with self.assertRaises(ValueError) as caught:
+                dialogue_turns.apply_turn(run_dir, turn, roster="alice,bob")
+            self.assertIn("leak from bob", str(caught.exception))
+            self.assertFalse(os.path.exists(os.path.join(run_dir, "transcript.md")))
+            self.assertFalse(os.path.exists(os.path.join(run_dir, "thoughts")))
+
+    def test_own_secret_may_be_said(self):
+        witness = "the march contract on the blue folder"
+        with tempfile.TemporaryDirectory() as run_dir:
+            dialogue_turns.remember_private(run_dir, "alice", witness)
+            turn = {
+                "bot": "alice",
+                "thoughts": "I can say my own line",
+                "message": f"The file is {witness}.",
+            }
+            dialogue_turns.apply_turn(run_dir, turn, roster="alice,bob")
+            transcript = read_text(os.path.join(run_dir, "transcript.md"))
+            self.assertEqual(transcript, f"**alice:** The file is {witness}.\n")
+
+    def test_whisper_stays_out_of_the_transcript(self):
+        secret = "whispered line about the window"
+        with tempfile.TemporaryDirectory() as run_dir:
+            parsed = dialogue_turns.parse_turn(
+                extended_text("alice", secret, "Come closer.", "whisper", "dm", "low", "no"),
+                roster="alice,bob",
+            )
+            result = dialogue_turns.apply_turn(run_dir, parsed, roster="alice,bob")
+            self.assertFalse(result["public"])
+            self.assertFalse(os.path.exists(os.path.join(run_dir, "transcript.md")))
+            stored = read_text(os.path.join(run_dir, "thoughts", "alice.jsonl"))
+            self.assertIn(secret, stored)
+            self.assertIn("Come closer.", stored)
+
+    def test_narrator_context_does_not_read_private_files(self):
+        witness = "the march contract on the blue folder"
+        with tempfile.TemporaryDirectory() as run_dir:
+            dialogue_turns.remember_private(run_dir, "bob", witness)
+            dialogue_turns.apply_turn(
+                run_dir,
+                {"bot": "alice", "thoughts": "alice thought stays here", "message": "Hello."},
+                roster="alice,bob",
+            )
+            narrator = dialogue_turns.narrator_context(run_dir)
+            self.assertEqual(narrator, {"transcript": "**alice:** Hello.\n"})
+            self.assertNotIn(witness, json.dumps(narrator))
+            self.assertNotIn("alice thought stays here", json.dumps(narrator))
 
 
 if __name__ == "__main__":

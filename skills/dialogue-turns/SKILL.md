@@ -1,26 +1,27 @@
 ---
 name: dialogue-turns
 description: >
-  Parse and validate dialogue turns for a multi-bot simulation in which one
-  session plays several persona bots plus an omniscient narrator. Use when a
-  bot must emit BOT, THOUGHTS, and MESSAGE, or when the narrator must receive
-  a SCENE block. Keeps private thoughts out of the shared transcript. Do not
-  use to invent the plot, or to show one bot another bot's thoughts.
+  Parse and validate dialogue turns for a multi-bot simulation. One session
+  per bot. The narrator sees the public transcript only. Use when a bot must
+  emit BOT, THOUGHTS, and MESSAGE, with optional ACTION, CHANNEL, EFFORT, and
+  SHOW. Keeps private thoughts out of the shared transcript, and blocks a
+  write that repeats another bot's private text. Do not use to invent the
+  plot, or to show one bot another bot's thoughts.
 ---
 
 # dialogue-turns
 
 ## When to use
 
-Use this when one Grok Build session plays several persona bots and an omniscient narrator.
+Use this when each bot has its own session and the narrator sees only the public transcript.
 
-Validate every bot turn before it is treated as spoken. Give the narrator a SCENE block before each narrator reply. The script records the public line and stores the thoughts.
+Validate every bot turn before it is treated as spoken. The script records a public line only for a public turn, and stores the thoughts for that bot.
 
 Do not use it to decide the story, and do not edit `transcript.md` by hand.
 
 ## Format
 
-A bot turn is exactly these three fields, in this order, each once:
+A bot turn is these three fields, in this order, each once:
 
 ```
 BOT: <name>
@@ -28,7 +29,20 @@ THOUGHTS: <private inner thoughts>
 MESSAGE: <public line>
 ```
 
-The message is required and must be non-empty. It may span lines. A line that starts with `**name:**`, `**name**:`, `__name:__`, or `__name__:` is rejected. Spaces and Unicode format characters in front of that line do not hide it. The name must be on the roster (`--roster a,b,c`). `apply` checks that roster again before it writes.
+The message is required, must be non-empty, and must be at most 45 words. It may span lines. A line that starts with `**name:**`, `**name**:`, `__name:__`, or `__name__:` is rejected. Spaces and Unicode format characters in front of that line do not hide it. The name must be on the roster (`--roster a,b,c`). `apply` checks that roster again before it writes.
+
+These four fields are optional as a group. If any one is present, all four are required, after `MESSAGE`, in this order:
+
+```
+ACTION: speak|whisper|gesture|silence|leave
+CHANNEL: public|dm|huddle|new:a,b
+EFFORT: low|medium|high
+SHOW: yes|no
+```
+
+`ACTION` is what the bot does. `CHANNEL` is where the line goes. `new:a,b` names the participants of a channel that does not exist yet. Two names open a dm. Three or more open a huddle. `EFFORT` is the effort for that bot's next move. `SHOW` says whether the next move announces that the bot is thinking.
+
+`whisper`, and any channel other than `public`, stay out of `transcript.md`.
 
 The narrator receives this block before each reply:
 
@@ -40,26 +54,30 @@ next: <name>
 directive: <optional, for example aside with X, or an interruption>
 ```
 
-`directive` may be omitted. `place`, `mood`, and `next` may not.
+`directive` may be omitted. `place`, `mood`, and `next` may not. The scene block is public. It is not a place to put thoughts, goals, or secrets.
 
 ## Privacy
 
 Thoughts never go into the shared session, and never go into `transcript.md`.
 
-`apply` appends only `**<bot>:** <message>` to `run_dir/transcript.md`. It appends the thoughts to `run_dir/thoughts/<bot>.jsonl` with a turn number and a timestamp.
+`apply` appends only `**<bot>:** <message>` to `run_dir/transcript.md`, and only when the turn is public. It appends the thoughts to `run_dir/thoughts/<bot>.jsonl` with a turn number and a timestamp.
+
+Before that write, `apply` checks for a leak. A bot may repeat its own private lines. If the thoughts or the message contain another bot's private line, nothing is written.
+
+Store those lines with `remember_private`. A private line shorter than 8 characters is rejected, so a common word cannot block the scene.
 
 For the next prompt:
 
 - call `private` for the bot that is about to speak, and pass only those thoughts
-- call `narrator` only for the narrator, who is omniscient
+- call `narrator` for the narrator, who receives the public transcript and nothing else
 
-There is no helper that returns another bot's thoughts for a persona prompt.
+There is no helper that returns another bot's thoughts for a persona prompt. `narrator` does not open `thoughts/` or `private/`.
 
 ## Effort
 
-Bot lines: low. A sentence or two of private thought, then one public line.
+Bot lines stay short. One or two sentences of private thought, then one public line of at most 45 words.
 
-Narrator turns: higher. Read the transcript and every thought, then write `place`, `mood`, `next`, and `directive` with care.
+`EFFORT` on a turn is a choice for the next move of that bot. It does not change the parser.
 
 ## CLI
 
@@ -85,4 +103,4 @@ python3 scripts/dialogue_turns.py render-scene \
   --directive "aside with bob"
 ```
 
-`private` defaults to the last 3 thoughts. Its stdout is for that bot's prompt only. `narrator` stdout is for the narrator's prompt only. Do not paste either into the shared session.
+`private` defaults to the last 3 thoughts. Its stdout is for that bot's prompt only. `narrator` stdout is the public transcript only. Do not paste either into the shared session.
