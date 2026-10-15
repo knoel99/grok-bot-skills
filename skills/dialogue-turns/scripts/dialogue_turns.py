@@ -39,6 +39,7 @@ _TURN_FIELDS = ("BOT", "THOUGHTS", "MESSAGE")
 _SCENE_LABELS = ("place", "mood", "next", "directive")
 _TURN_HEADER = _label_pattern(_TURN_FIELDS)
 _SCENE_HEADER = _label_pattern(_SCENE_LABELS)
+_SPEAKER_LINE = re.compile(r"^\*\*.+?:\*\*")
 
 
 def parse_turn(text, roster):
@@ -63,21 +64,25 @@ def parse_turn(text, roster):
         raise ValueError("THOUGHTS is empty")
     if not message:
         raise ValueError("MESSAGE is empty")
+    _reject_speaker_line(message)
     _validate_bot_name(bot)
     if bot not in allowed:
         raise ValueError(f"unknown bot: {bot}")
     return {"bot": bot, "thoughts": thoughts, "message": message}
 
 
-def apply_turn(run_dir, turn):
+def apply_turn(run_dir, turn, roster):
     """Append the public line to transcript.md and the thoughts to that bot's jsonl.
 
     The transcript receives only `**<bot>:** <message>`. Thoughts stay in
     run_dir/thoughts/<bot>.jsonl with a turn number and a timestamp.
+    The bot is checked against roster again before anything is written.
     """
     if not run_dir or not str(run_dir).strip():
         raise ValueError("run_dir is required")
     bot, thoughts, message = _turn_parts(turn)
+    if bot not in _roster_names(roster):
+        raise ValueError(f"unknown bot: {bot}")
     thoughts_path = _thoughts_path(run_dir, bot)
     os.makedirs(os.path.dirname(thoughts_path), exist_ok=True)
     number = _next_turn_number(run_dir)
@@ -207,7 +212,7 @@ def main(argv=None):
     try:
         if args.command == "apply":
             turn = parse_turn(sys.stdin.read(), args.roster)
-            apply_turn(args.run_dir, turn)
+            apply_turn(args.run_dir, turn, args.roster)
             sys.stdout.write(_public_line(turn["bot"], turn["message"]) + "\n")
         elif args.command == "scene":
             _print_json(parse_scene(sys.stdin.read()))
@@ -310,7 +315,14 @@ def _turn_parts(turn):
         raise ValueError("THOUGHTS is empty")
     if not message:
         raise ValueError("MESSAGE is empty")
+    _reject_speaker_line(message)
     return bot, thoughts, message
+
+
+def _reject_speaker_line(message):
+    for line in message.splitlines():
+        if _SPEAKER_LINE.match(line.lstrip()):
+            raise ValueError("MESSAGE line looks like a transcript speaker line")
 
 
 def _public_line(bot, message):
