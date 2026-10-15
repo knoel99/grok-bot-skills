@@ -29,15 +29,22 @@ __all__ = [
     "main",
 ]
 
-_TURN_FIELDS = ("BOT", "PENSEES", "MESSAGE")
-_TURN_HEADER = re.compile(r"^(BOT|PENSEES|MESSAGE):(.*)$")
-_SCENE_HEADER = re.compile(r"^(lieu|humeur|prochain|consigne):(.*)$")
+
+def _label_pattern(labels):
+    inner = "|".join(re.escape(label) for label in labels)
+    return re.compile(rf"^({inner}):(.*)$")
+
+
+_TURN_FIELDS = ("BOT", "THOUGHTS", "MESSAGE")
+_SCENE_LABELS = ("place", "mood", "next", "directive")
+_TURN_HEADER = _label_pattern(_TURN_FIELDS)
+_SCENE_HEADER = _label_pattern(_SCENE_LABELS)
 
 
 def parse_turn(text, roster):
     """Validate one bot turn. Return {bot, thoughts, message}.
 
-    Exactly one BOT, PENSEES, and MESSAGE, in that order. The message is
+    Exactly one BOT, THOUGHTS, and MESSAGE, in that order. The message is
     non-empty. The bot is on the roster (a comma-separated string or a list).
     """
     if text is None or not str(text).strip():
@@ -45,15 +52,15 @@ def parse_turn(text, roster):
     allowed = _roster_names(roster)
     blocks = _blocks(str(text).splitlines(), _TURN_HEADER, "unexpected line before BOT")
     names = [name for name, _ in blocks]
-    _require_fields(names, _TURN_FIELDS, "fields must be BOT, PENSEES, MESSAGE in that order")
+    _require_fields(names, _TURN_FIELDS, "fields must be " + ", ".join(_TURN_FIELDS) + " in that order")
     values = {name: value for name, value in blocks}
     bot = values["BOT"]
-    thoughts = values["PENSEES"]
+    thoughts = values["THOUGHTS"]
     message = values["MESSAGE"]
     if not bot:
         raise ValueError("BOT is empty")
     if not thoughts:
-        raise ValueError("PENSEES is empty")
+        raise ValueError("THOUGHTS is empty")
     if not message:
         raise ValueError("MESSAGE is empty")
     _validate_bot_name(bot)
@@ -81,29 +88,29 @@ def apply_turn(run_dir, turn):
     return {"turn": number, "timestamp": timestamp, "bot": bot}
 
 
-def render_scene(lieu, humeur, prochain, consigne=None):
-    """Render a narrator SCENE block. consigne is omitted when empty.
+def render_scene(place, mood, next_speaker, directive=None):
+    """Render a narrator SCENE block. directive is omitted when empty.
 
-    humeur is a name-to-state mapping, or a string `name=state; ...`.
+    mood is a name-to-state mapping, or a string `name=state; ...`.
     """
-    lieu = _clean_line(lieu, "lieu")
-    prochain = _clean_line(prochain, "prochain")
-    humeur_text = _format_humeur(humeur)
+    place = _clean_line(place, "place")
+    next_speaker = _clean_line(next_speaker, "next")
+    mood_text = _format_mood(mood)
     lines = [
         "SCENE:",
-        f"lieu: {lieu}",
-        f"humeur: {humeur_text}",
-        f"prochain: {prochain}",
+        f"place: {place}",
+        f"mood: {mood_text}",
+        f"next: {next_speaker}",
     ]
-    if consigne is not None and str(consigne).strip():
-        lines.append(f"consigne: {_clean_line(consigne, 'consigne')}")
+    if directive is not None and str(directive).strip():
+        lines.append(f"directive: {_clean_line(directive, 'directive')}")
     return "\n".join(lines) + "\n"
 
 
 def parse_scene(text):
-    """Parse a SCENE block. Return lieu, humeur, prochain, and consigne.
+    """Parse a SCENE block. Return place, mood, next, and directive.
 
-    humeur is a dict of name to state. consigne is None when omitted.
+    mood is a dict of name to state. directive is None when omitted.
     """
     if text is None or not str(text).strip():
         raise ValueError("scene is empty")
@@ -115,18 +122,19 @@ def parse_scene(text):
         raise ValueError("scene must start with SCENE:")
     blocks = _blocks(lines[index + 1 :], _SCENE_HEADER, "unexpected line in scene")
     names = [name for name, _ in blocks]
-    expected = ["lieu", "humeur", "prochain"]
-    if "consigne" in names:
-        expected.append("consigne")
-    _require_fields(names, expected, "scene fields must be lieu, humeur, prochain, then optional consigne")
+    required = list(_SCENE_LABELS[:-1])
+    optional = _SCENE_LABELS[-1]
+    expected = required + ([optional] if optional in names else [])
+    order = "scene fields must be " + ", ".join(required) + ", then optional " + optional
+    _require_fields(names, expected, order)
     values = {name: value for name, value in blocks}
-    lieu = _clean_line(values["lieu"], "lieu")
-    prochain = _clean_line(values["prochain"], "prochain")
-    humeur = _parse_humeur(values["humeur"])
-    consigne = None
-    if "consigne" in values and values["consigne"].strip():
-        consigne = _clean_line(values["consigne"], "consigne")
-    return {"lieu": lieu, "humeur": humeur, "prochain": prochain, "consigne": consigne}
+    place = _clean_line(values["place"], "place")
+    next_speaker = _clean_line(values["next"], "next")
+    mood = _parse_mood(values["mood"])
+    directive = None
+    if optional in values and values[optional].strip():
+        directive = _clean_line(values[optional], optional)
+    return {"place": place, "mood": mood, "next": next_speaker, "directive": directive}
 
 
 def private_context(run_dir, bot, last_n=3):
@@ -182,10 +190,10 @@ def main(argv=None):
     commands.add_parser("scene", help="parse a SCENE block on stdin")
 
     render_parser = commands.add_parser("render-scene", help="print a SCENE block")
-    render_parser.add_argument("--lieu", required=True)
-    render_parser.add_argument("--humeur", required=True, help="name=state; name=state")
-    render_parser.add_argument("--prochain", required=True)
-    render_parser.add_argument("--consigne")
+    render_parser.add_argument("--place", required=True)
+    render_parser.add_argument("--mood", required=True, help="name=state; name=state")
+    render_parser.add_argument("--next", required=True, dest="next_speaker")
+    render_parser.add_argument("--directive")
 
     private_parser = commands.add_parser("private", help="print one bot's recent thoughts")
     private_parser.add_argument("--run-dir", required=True)
@@ -205,7 +213,7 @@ def main(argv=None):
             _print_json(parse_scene(sys.stdin.read()))
         elif args.command == "render-scene":
             sys.stdout.write(
-                render_scene(args.lieu, args.humeur, args.prochain, args.consigne)
+                render_scene(args.place, args.mood, args.next_speaker, args.directive)
             )
         elif args.command == "private":
             _print_json(private_context(args.run_dir, args.bot, args.last_n))
@@ -299,7 +307,7 @@ def _turn_parts(turn):
     if not bot:
         raise ValueError("BOT is empty")
     if not thoughts:
-        raise ValueError("PENSEES is empty")
+        raise ValueError("THOUGHTS is empty")
     if not message:
         raise ValueError("MESSAGE is empty")
     return bot, thoughts, message
@@ -316,48 +324,48 @@ def _clean_line(value, label):
     return text
 
 
-def _format_humeur(humeur):
-    if isinstance(humeur, str):
-        return _join_humeur(_parse_humeur(humeur))
-    if isinstance(humeur, dict):
-        if not humeur:
-            raise ValueError("humeur is empty")
+def _format_mood(mood):
+    if isinstance(mood, str):
+        return _join_mood(_parse_mood(mood))
+    if isinstance(mood, dict):
+        if not mood:
+            raise ValueError("mood is empty")
         pairs = []
-        for name, state in humeur.items():
+        for name, state in mood.items():
             name = " ".join(str(name).split())
             state = " ".join(str(state).split())
             if not name or not state or any(char in name or char in state for char in ";="):
-                raise ValueError(f"invalid humeur entry: {name}={state}")
+                raise ValueError(f"invalid mood entry: {name}={state}")
             pairs.append((name, state))
-        return _join_humeur(dict(pairs))
-    raise ValueError("humeur must be a string or a mapping")
+        return _join_mood(dict(pairs))
+    raise ValueError("mood must be a string or a mapping")
 
 
-def _parse_humeur(text):
+def _parse_mood(text):
     flat = " ".join(str(text).split())
     if not flat:
-        raise ValueError("humeur is empty")
+        raise ValueError("mood is empty")
     parsed = {}
     for part in flat.split(";"):
         part = part.strip()
         if not part:
             continue
         if "=" not in part:
-            raise ValueError(f"invalid humeur entry: {part}")
+            raise ValueError(f"invalid mood entry: {part}")
         name, state = part.split("=", 1)
         name = name.strip()
         state = state.strip()
         if not name or not state or "=" in name or ";" in name:
-            raise ValueError(f"invalid humeur entry: {part}")
+            raise ValueError(f"invalid mood entry: {part}")
         if name in parsed:
-            raise ValueError(f"duplicate humeur: {name}")
+            raise ValueError(f"duplicate mood: {name}")
         parsed[name] = state
     if not parsed:
-        raise ValueError("humeur is empty")
+        raise ValueError("mood is empty")
     return parsed
 
 
-def _join_humeur(mapping):
+def _join_mood(mapping):
     return "; ".join(f"{name}={state}" for name, state in mapping.items())
 
 
