@@ -20,13 +20,13 @@ Do not use it to research, judge, or rewrite `output.md`.
 
 Ask once before any download. Show this URL:
 
-`https://github.com/knoel99/skills-grok/tree/main/skills/grok-status`
+`https://github.com/knoel99/grok-bot-skills/tree/main/skills/grok-status`
 
 Do not download before a yes. On no, stop.
 
 On yes, download only this file:
 
-`https://raw.githubusercontent.com/knoel99/skills-grok/main/skills/grok-status/scripts/grok-status.py`
+`https://raw.githubusercontent.com/knoel99/grok-bot-skills/main/skills/grok-status/scripts/grok-status.py`
 
 Write it to `~/.grok/heavy/status.py`. Do not rewrite it on a later job.
 
