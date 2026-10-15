@@ -66,7 +66,7 @@ report.md
 
 ## What the runner does
 
-Each bot is one `grok -p` session, resumed with `--resume` and the effort that bot chose for this move. The output format is `streaming-json`. A move sends the unread lines from that bot's own channels.
+Each bot is one `grok -p` session, resumed with `--resume` and the effort that bot chose for this move. The output format is `streaming-json`. A move sends the unread lines from that bot's own channels. The sheet step calls grok at medium effort with up to 4 turns. A reply that is not a sheet is sent back once with the error.
 
 Bots run at the same time. The scheduler publishes the first finished move. It does not wait for a slower bot.
 
