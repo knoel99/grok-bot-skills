@@ -28,7 +28,7 @@ THOUGHTS: <private inner thoughts>
 MESSAGE: <public line>
 ```
 
-The message is required and must be non-empty. It may span lines. A line that starts with `**<name>:**` is rejected. The name must be on the roster (`--roster a,b,c`). `apply` checks that roster again before it writes.
+The message is required and must be non-empty. It may span lines. A line that starts with `**name:**`, `**name**:`, `__name:__`, or `__name__:` is rejected. Spaces and Unicode format characters in front of that line do not hide it. The name must be on the roster (`--roster a,b,c`). `apply` checks that roster again before it writes.
 
 The narrator receives this block before each reply:
 

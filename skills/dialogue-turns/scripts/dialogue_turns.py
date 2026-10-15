@@ -17,6 +17,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from datetime import datetime, timezone
 
 __all__ = [
@@ -39,7 +40,9 @@ _TURN_FIELDS = ("BOT", "THOUGHTS", "MESSAGE")
 _SCENE_LABELS = ("place", "mood", "next", "directive")
 _TURN_HEADER = _label_pattern(_TURN_FIELDS)
 _SCENE_HEADER = _label_pattern(_SCENE_LABELS)
-_SPEAKER_LINE = re.compile(r"^\*\*.+?:\*\*")
+_SPEAKER_LINE = re.compile(
+    r"^(?:\*\*(?:(?!\*\*).)+?(?::\*\*|\*\*:)|__(?:(?!__).)+?(?::__|__:))"
+)
 
 
 def parse_turn(text, roster):
@@ -319,9 +322,20 @@ def _turn_parts(turn):
     return bot, thoughts, message
 
 
+def _without_leading_format(line):
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if char.isspace() or unicodedata.category(char) == "Cf":
+            index += 1
+            continue
+        break
+    return line[index:]
+
+
 def _reject_speaker_line(message):
     for line in message.splitlines():
-        if _SPEAKER_LINE.match(line.lstrip()):
+        if _SPEAKER_LINE.match(_without_leading_format(line)):
             raise ValueError("MESSAGE line looks like a transcript speaker line")
 
 
