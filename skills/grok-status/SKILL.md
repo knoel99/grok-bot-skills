@@ -30,7 +30,7 @@ On yes, download only this file:
 
 Write it to `~/.grok/heavy/status.py`. Do not rewrite it on a later job.
 
-If this folder is already on disk (Cursor, Claude, or Grok Build), skip the download and run `scripts/grok-status.py` from the skill directory.
+If this folder is already on disk, skip the download and run `scripts/grok-status.py` from the skill directory.
 
 ## Run
 
@@ -50,10 +50,10 @@ The grok command must use `--output-format streaming-json`. Do not add `--includ
 
 ## What it writes
 
-- `status.txt` — four lines. Read this when asked for progress.
-- `messages.jsonl` — one record per tool call, assistant text, and final result. It skips `stream_event` lines and thinking text.
-- `session` — the session id, once seen.
-- `output.md` — only if that file is missing or empty when the process exits. Never replace an `output.md` that already has text.
+- `status.txt`. Four lines. Read this when asked for progress.
+- `messages.jsonl`. One record per tool call, assistant text, and final result. It skips `stream_event` lines and thinking text.
+- `session`. The session id, once seen.
+- `output.md`. Only if that file is missing or empty when the process exits. Never replace an `output.md` that already has text.
 
 ## Progress answer
 
